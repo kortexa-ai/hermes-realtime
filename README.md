@@ -221,7 +221,7 @@ platforms:
 | `LIVEKIT_ALLOW_ALL_USERS`        | no       | `1`/`true` allows any participant (dev only)                       |
 | `LIVEKIT_PRESENCE_POLL_INTERVAL` | no       | seconds; auto-picked (cloud 30s, local 5s)                         |
 | `HERMES_LIVEKIT_TOOL_TIMEOUT_SEC` | no      | native RPC response timeout; default 30 seconds                    |
-| `HERMES_LIVEKIT_REMOTE_TOOL_POLICY` | no    | bounded JSON policy; absent or invalid denies all remote tools     |
+| `HERMES_LIVEKIT_REMOTE_TOOL_POLICY` | no    | bounded JSON policy; absent denies tools without a signed API admission |
 
 Or run the interactive prompt:
 
@@ -669,9 +669,10 @@ Tool catalogs use the portable Conference envelope on `conference.tools`:
 {"type": "conference.tools.register", "tools": []}
 ```
 
-Remote tools are disabled unless `HERMES_LIVEKIT_REMOTE_TOOL_POLICY` contains
-an exact participant/name entry. Tier 1 permits the exact entry. Tier 2 also
-requires a future Unix `consent_expires_at`. Tier 3 is always denied:
+Remote tools require either a signed API admission for the live participant
+or an exact participant/name entry in `HERMES_LIVEKIT_REMOTE_TOOL_POLICY`.
+Tier 1 permits the exact entry. Tier 2 also requires a future Unix
+`consent_expires_at`. Tier 3 is always denied:
 
 ```json
 {"tools":[{"participant_identity":"desktop-client","tool_name":"desktop_notify","tier":2,"consent_expires_at":1798761600}]}
@@ -680,6 +681,22 @@ requires a future Unix `consent_expires_at`. Tier 3 is always denied:
 The policy is loaded once when the adapter is constructed. See
 [`docs/remote-tools-design.md`](docs/remote-tools-design.md) for the closed
 classification, bounds, and audit contract.
+
+An authorized Kortexa API join can carry `kortexa_voice_client` metadata signed
+with the existing `HERMES_REALTIME_PROXY_SIGNING_KEY`. The verifier binds the
+room, exact participant, one-hour admission window and voice context. It does
+not trust an unsigned metadata assertion or expose the account identity.
+Admission permits only that live owner's declared client tools; explicit tier 3
+denials, expired tier 2 entries and malformed policy remain denied. Reconnecting
+participants must be admitted again, while the unchanged live participant keeps
+its connection lease. Captured handlers and in-flight results cannot cross a
+participant or room replacement.
+
+The signed context adds API-owned speech guidance alongside session instructions
+for both typed and spoken Conference turns. Companion-card guidance is added only
+when the owner's `display_card` tool is registered and enabled. Direct Realtime
+accepts this context only inside its verified, body-bound API proxy request;
+ordinary direct clients cannot assert it through an unsigned session field.
 
 Advertised RPC method names use case-sensitive ASCII identifier segments
 separated by single dots, with a 64-character total limit. For example,

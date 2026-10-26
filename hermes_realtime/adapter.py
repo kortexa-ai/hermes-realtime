@@ -89,6 +89,7 @@ from .tool_result_protocol import (
     validate_stream_header,
 )
 from .direct_tools import resolve_gateway_session_key
+from .client_admission import ClientAdmission, verify_client_admission
 from .tool_model import (
     FunctionToolDefinition,
     ToolDefinitionError,
@@ -286,6 +287,8 @@ class LiveKitAdapter(NativeTranscriptMixin, LiveKitStreamingTTSMixin, BasePlatfo
         self._tool_owners: Dict[str, str] = {}  # registry name -> owner identity
         self._tool_methods: Dict[str, str] = {}  # registry name -> RPC method
         self._tool_policy = self._resolve_tool_policy()
+        self._api_client_key = str(get_scoped_secret("HERMES_REALTIME_PROXY_SIGNING_KEY", "") or "").strip()
+        self._api_client_admissions = {}
         self._tool_audit = ToolAuditLog()
         self._pending_native_rpc_tasks: dict[str, set[asyncio.Task[Any]]] = {}
         _LIVE_ADAPTERS.add(self)
@@ -350,9 +353,11 @@ class LiveKitAdapter(NativeTranscriptMixin, LiveKitStreamingTTSMixin, BasePlatfo
     def _resolve_tool_policy(self) -> ToolPolicy:
         """Load the closed operator policy; malformed input denies every tool."""
         raw = get_scoped_secret("HERMES_LIVEKIT_REMOTE_TOOL_POLICY", "")
+        self._tool_policy_invalid = False
         try:
             return ToolPolicy.parse(raw)
         except ToolPolicyError:
+            self._tool_policy_invalid = True
             logger.warning(
                 "[%s] remote-tool policy invalid; all remote tools denied",
                 self.name,
@@ -733,6 +738,7 @@ class LiveKitAdapter(NativeTranscriptMixin, LiveKitStreamingTTSMixin, BasePlatfo
         self._paused = False
 
     def _on_participant_connected(self, participant: "rtc.RemoteParticipant") -> None:
+        self._api_client_admission(participant.identity)
         empty_room_task = getattr(self, "_empty_room_task", None)
         if empty_room_task and not empty_room_task.done():
             empty_room_task.cancel()
@@ -838,6 +844,7 @@ class LiveKitAdapter(NativeTranscriptMixin, LiveKitStreamingTTSMixin, BasePlatfo
         self._cleanup_participant(identity)
         # Drop any tools this client had registered.
         self._cleanup_client_tools(identity)
+        getattr(self, "_api_client_admissions", {}).pop(identity, None)
         self._fail_binary_owner(identity)
         protocol = getattr(self, "_realtime_protocol", None)
         if protocol:
@@ -1364,6 +1371,7 @@ class LiveKitAdapter(NativeTranscriptMixin, LiveKitStreamingTTSMixin, BasePlatfo
                 media_urls=media_urls,
                 media_types=media_types,
                 timestamp=datetime.now(tz=timezone.utc),
+                channel_prompt=self._voice_prompt_for_client(identity),
             )
 
             # Agent is about to invoke the LLM.
@@ -1601,6 +1609,7 @@ class LiveKitAdapter(NativeTranscriptMixin, LiveKitStreamingTTSMixin, BasePlatfo
             media_urls=media_urls,
             media_types=media_types,
             timestamp=datetime.now(tz=timezone.utc),
+            channel_prompt=self._voice_prompt_for_client(identity),
         )
 
         if publish_transcript:
@@ -2236,6 +2245,10 @@ class LiveKitAdapter(NativeTranscriptMixin, LiveKitStreamingTTSMixin, BasePlatfo
         arguments object, kwargs are framework extras we pass through.
         """
 
+        self._ensure_binary_state()
+        owner_room = self._room
+        owner_generation = getattr(self, "_room_generation", 0)
+        owner_participant = owner_room.remote_participants.get(owner_identity) if owner_room else None
         try:
             owner_loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -2245,6 +2258,10 @@ class LiveKitAdapter(NativeTranscriptMixin, LiveKitStreamingTTSMixin, BasePlatfo
             args: dict[str, Any] | None, invocation_session_key: str
         ) -> Any:
             import json as _json
+
+            if (self._room is not owner_room or getattr(self, "_room_generation", 0) != owner_generation
+                    or owner_room is None or owner_room.remote_participants.get(owner_identity) is not owner_participant):
+                raise RuntimeError("remote tool owner was replaced")
 
             decision = self._tool_policy_decision(owner_identity, registered_name)
             if not decision.allowed:
@@ -2273,6 +2290,8 @@ class LiveKitAdapter(NativeTranscriptMixin, LiveKitStreamingTTSMixin, BasePlatfo
                 )
                 if room is not self._room or generation != self._room_generation:
                     raise RuntimeError("remote tool room was replaced")
+                if room.remote_participants.get(owner_identity) is not owner_participant:
+                    raise RuntimeError("remote tool owner was replaced")
                 decoded = _json.loads(result)
                 if isinstance(decoded, dict) and decoded.get("type") == REFERENCE_TYPE:
                     decoded = await self._receive_binary_result(
@@ -2281,6 +2300,8 @@ class LiveKitAdapter(NativeTranscriptMixin, LiveKitStreamingTTSMixin, BasePlatfo
                         room=room,
                         generation=generation,
                     )
+                    if room.remote_participants.get(owner_identity) is not owner_participant:
+                        raise RuntimeError("remote tool owner was replaced")
             except asyncio.CancelledError:
                 self._audit_tool(
                     "invocation", owner_identity, registered_name, decision.tier, "cancelled"
@@ -2384,6 +2405,11 @@ class LiveKitAdapter(NativeTranscriptMixin, LiveKitStreamingTTSMixin, BasePlatfo
     ) -> PolicyDecision:
         self._ensure_tool_safety_state()
         decision = self._tool_policy.decide(participant_identity, tool_name)
+        # Only an API-authenticated live owner can extend its own declared client
+        # tools. Explicit operator denials/expired consent remain authoritative.
+        if (decision.reason == "not-allowlisted" and not getattr(self, "_tool_policy_invalid", False)
+                and self._api_client_admission(participant_identity)):
+            decision = PolicyDecision(True, 2, "consent-valid")
         self._audit_tool(
             "policy",
             participant_identity,
@@ -2392,6 +2418,38 @@ class LiveKitAdapter(NativeTranscriptMixin, LiveKitStreamingTTSMixin, BasePlatfo
             decision.reason,
         )
         return decision
+
+    def _api_client_admission(self, identity: str) -> ClientAdmission | None:
+        room = getattr(self, "_room", None)
+        participant = room.remote_participants.get(identity) if room else None
+        if participant is None:
+            return None
+        metadata = getattr(participant, "metadata", "")
+        generation = getattr(self, "_room_generation", 0)
+        cache = self.__dict__.setdefault("_api_client_admissions", {})
+        prior = cache.get(identity)
+        # Like JWT room admission, expiry gates a new connection. The exact live
+        # participant retains its lease; metadata or room/owner changes recheck it.
+        if prior and prior[0] is room and prior[1] == generation and prior[2] is participant and prior[3] == metadata:
+            return prior[4]
+        admission = verify_client_admission(metadata, room=getattr(self, "_room_name", ""),
+            participant=identity, key=getattr(self, "_api_client_key", ""))
+        if admission:
+            cache[identity] = (room, generation, participant, metadata, admission)
+        else:
+            cache.pop(identity, None)
+        return admission
+
+    def _voice_prompt_for_client(self, identity: str) -> str | None:
+        protocol = getattr(self, "_realtime_protocol", None)
+        instructions = getattr(protocol, "instructions", "")
+        admission = self._api_client_admission(identity)
+        prompts = [admission.voice.base if admission else "", instructions]
+        if admission and getattr(protocol, "tool_choice", "auto") != "none":
+            if any(owner == identity and self._tool_methods.get(name) == "display_card"
+                   for name, owner in getattr(self, "_tool_owners", {}).items()):
+                prompts.append(admission.voice.display)
+        return "\n\n".join(prompt for prompt in prompts if prompt) or None
 
     def _audit_tool(
         self,
@@ -2482,6 +2540,7 @@ class LiveKitAdapter(NativeTranscriptMixin, LiveKitStreamingTTSMixin, BasePlatfo
         self._client_tools.clear()
         self._tool_owners.clear()
         self._tool_methods.clear()
+        getattr(self, "_api_client_admissions", {}).clear()
 
     def _drain_pending_captures(self) -> tuple[list[str], list[str]]:
         """Pop all buffered frame paths into parallel (urls, types) lists.

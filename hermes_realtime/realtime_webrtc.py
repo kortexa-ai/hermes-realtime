@@ -18,6 +18,7 @@ import os
 import re
 import time
 import uuid
+from .client_admission import VoiceContext, parse_voice_context
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from fractions import Fraction
@@ -292,6 +293,8 @@ class RealtimeCall:
     protocol: RealtimeProtocol
     client_identity: str = CLIENT_IDENTITY
     tool_bridge: DirectToolBridge | None = None
+    server_voice_context: VoiceContext | None = None
+    client_tool_names: set[str] = field(default_factory=set)
     data_channel: Any = None
     tasks: set[asyncio.Task[Any]] = field(default_factory=set)
     audio_buffer: bytearray = field(default_factory=bytearray)
@@ -777,6 +780,9 @@ class RealtimeWebRTCAdapter(NativeTranscriptMixin, RealtimeStreamingTTSMixin, Ba
                 output_track,
                 protocol,
                 client_identity=client_identity,
+                server_voice_context=(parse_voice_context(session.get("_kortexa_voice"))
+                    if request.headers.get(PROXY_SIGNATURE_HEADER) else None),
+                client_tool_names={tool.name for tool in tools},
                 vad=self._vad_factory(minimum_floor=RMS_SILENCE_FLOOR),
                 vad_factory=self._vad_factory,
                 silence_duration=self._silence_duration,
@@ -895,7 +901,10 @@ class RealtimeWebRTCAdapter(NativeTranscriptMixin, RealtimeStreamingTTSMixin, Ba
 
     async def _dispatch_text(self, call: RealtimeCall, text: str, kind: MessageType) -> None:
         source = self._source_for_call(call)
-        prompts = [call.protocol.instructions.strip()]
+        context = call.server_voice_context
+        prompts = [context.base if context else "", call.protocol.instructions.strip()]
+        if context and "display_card" in call.client_tool_names and call.protocol.tool_choice != "none":
+            prompts.append(context.display)
         if call.tool_bridge is not None and call.protocol.tool_choice != "none":
             prompts.append(
                 call.tool_bridge.prompt_hint(call.protocol.tool_choice).strip()

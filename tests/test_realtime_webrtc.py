@@ -35,6 +35,8 @@ from hermes_realtime.realtime_webrtc import (
     check_realtime_requirements,
 )
 from tools.registry import registry
+from hermes_realtime.client_admission import VoiceContext
+from gateway.platforms.base import MessageType
 import hermes_realtime.realtime_webrtc as webrtc_module
 
 
@@ -54,13 +56,15 @@ def realtime_platform() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("signed", [False, True])
 async def test_direct_listener_negotiates_and_sends_session_created(
-    realtime_platform: None,
+    realtime_platform: None, signed: bool,
 ) -> None:
     adapter = RealtimeWebRTCAdapter(
         PlatformConfig(
             enabled=True,
-            extra={"host": "127.0.0.1", "port": 0, "api_key": "test-token", "silence_duration": 0.7},
+            extra={"host": "127.0.0.1", "port": 0, "api_key": "test-token", "silence_duration": 0.7,
+                "proxy_signing_key": "fixture-secret"},
         )
     )
     peer = RTCPeerConnection()
@@ -87,11 +91,10 @@ async def test_direct_listener_negotiates_and_sends_session_created(
         await peer.setLocalDescription(await peer.createOffer())
         form = FormData(default_to_multipart=True)
         form.add_field("sdp", peer.localDescription.sdp)
-        form.add_field(
-            "session",
-            json.dumps({
+        session_json = json.dumps({
                 "type": "realtime",
                 "instructions": "Initial instructions.",
+                "_kortexa_voice": {"version": 1, "base": "Voice guidance.", "display": "Supporting detail."},
                 "tools": [{
                     "type": "function",
                     "name": "fixture_echo",
@@ -99,15 +102,17 @@ async def test_direct_listener_negotiates_and_sends_session_created(
                     "parameters": {"type": "object", "properties": {}},
                 }],
                 "tool_choice": "auto",
-            }),
-        )
+            })
+        form.add_field("session", session_json)
+        headers = {"Authorization": "Bearer test-token"}
+        if signed:
+            headers.update(_proxy_headers(principal="user-a", call_id="rt_fixture-call", sdp=peer.localDescription.sdp,
+                session_json=session_json, secret="fixture-secret"))
         async with ClientSession() as client:
             async with client.post(
                 f"http://127.0.0.1:{port}/v1/realtime/calls",
                 data=form,
-                headers={
-                    "Authorization": "Bearer test-token",
-                },
+                headers=headers,
             ) as response:
                 assert response.status == 201
                 assert response.content_type == "application/sdp"
@@ -122,6 +127,7 @@ async def test_direct_listener_negotiates_and_sends_session_created(
         assert received[0]["session"]["instructions"] == "Initial instructions."
         assert len(adapter._calls) == 1
         active_call = next(iter(adapter._calls.values()))
+        assert active_call.server_voice_context == (VoiceContext("Voice guidance.", "Supporting detail.") if signed else None)
         assert active_call.silence_duration == 0.7
         assert active_call.tool_bridge is not None
         registered_name = next(iter(active_call.tool_bridge._registered))
@@ -154,6 +160,23 @@ async def test_direct_listener_negotiates_and_sends_session_created(
 async def _wait_until(predicate, interval: float = 0.01) -> None:
     while not predicate():
         await asyncio.sleep(interval)
+
+
+@pytest.mark.asyncio
+async def test_direct_voice_prompt_survives_session_instruction_changes():
+    adapter = object.__new__(RealtimeWebRTCAdapter)
+    adapter._source_for_call = lambda call: SimpleNamespace(chat_id="fixture")
+    adapter.handle_message = AsyncMock()
+    call = SimpleNamespace(server_voice_context=VoiceContext("Voice guidance.", "Supporting detail."),
+        client_tool_names={"display_card"}, tool_bridge=None,
+        protocol=SimpleNamespace(instructions="User preference.", tool_choice="auto", response_started=AsyncMock()))
+    await adapter._dispatch_text(call, "Hello", MessageType.TEXT)
+    event = adapter.handle_message.await_args.args[0]
+    assert event.channel_prompt == "Voice guidance.\n\nUser preference.\n\nSupporting detail."
+    call.protocol.instructions = ""
+    call.protocol.tool_choice = "none"
+    await adapter._dispatch_text(call, "Hello again", MessageType.VOICE)
+    assert adapter.handle_message.await_args.args[0].channel_prompt == "Voice guidance."
 
 
 def test_gateway_profile_name_is_derived_from_process_home(tmp_path) -> None:

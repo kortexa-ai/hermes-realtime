@@ -14,7 +14,11 @@ import pytest
 import hermes_realtime
 from hermes_realtime.adapter import LiveKitAdapter
 from hermes_realtime.tool_safety import ToolAuditLog, ToolPolicy
+from hermes_realtime.client_admission import ADMISSION_KEY, admission_payload
 from tools.registry import registry
+import hashlib
+import hmac
+import time
 
 
 _EXAMPLE_PATH = Path(__file__).parents[1] / "examples" / "test_client.py"
@@ -150,6 +154,91 @@ async def test_small_rpc_result_is_rejected_after_room_replacement():
     handler = adapter._build_tool_handler("client-1", "desktop_notify")
     with pytest.raises(RuntimeError, match="room was replaced"):
         await handler({})
+
+
+@pytest.mark.asyncio
+async def test_tool_handler_cannot_cross_a_same_identity_reconnect():
+    participant = FakeLocalParticipant()
+    adapter = adapter_with_client(participant)
+    handler = adapter._build_tool_handler("client-1", "desktop_notify")
+    adapter._room.remote_participants["client-1"] = object()
+    with pytest.raises(RuntimeError, match="owner was replaced"):
+        await handler({})
+    assert participant.calls == []
+
+
+@pytest.mark.asyncio
+async def test_rpc_result_is_dropped_when_the_owner_is_replaced_in_flight():
+    participant = FakeLocalParticipant()
+    adapter = adapter_with_client(participant)
+    async def replace_owner(**kwargs):
+        adapter._room.remote_participants["client-1"] = object()
+        return '{"ok":true}'
+    participant.perform_rpc = replace_owner
+    with pytest.raises(RuntimeError, match="owner was replaced"):
+        await adapter._build_tool_handler("client-1", "desktop_notify")({})
+
+
+def api_admitted_adapter():
+    adapter = adapter_for_registration()
+    adapter._room_name = "room-a"
+    adapter._api_client_key = "fixture-secret"
+    now = int(time.time())
+    value = {"version": 1, "room": "room-a", "participant": "client-a", "principal": "a" * 64,
+        "issued_at": now, "expires_at": now + 3600, "nonce": "00000000-0000-4000-8000-000000000001",
+        "voice": {"version": 1, "base": "Voice guidance.", "display": "Show supporting detail."}}
+    value["signature"] = hmac.new(b"fixture-secret", admission_payload(value).encode(), hashlib.sha256).hexdigest()
+    adapter._room.remote_participants["client-a"] = SimpleNamespace(metadata=json.dumps({ADMISSION_KEY: value}))
+    adapter._tool_policy = ToolPolicy()
+    return adapter
+
+
+@pytest.mark.asyncio
+async def test_api_admission_registers_only_its_live_owners_tools(monkeypatch):
+    adapter = api_admitted_adapter()
+    registered = {}
+    monkeypatch.setattr(registry, "get_entry", lambda name: registered.get(name))
+    monkeypatch.setattr(registry, "register", lambda **kw: registered.__setitem__(kw["name"], kw))
+    assert await adapter._register_client_tool(advertised_tool("display_card"), "client-a")
+    assert not await adapter._register_client_tool(advertised_tool("display_card"), "client-b")
+    assert len(registered) == 1
+
+
+@pytest.mark.parametrize("tier,extra", [(3, {}), (2, {"consent_expires_at": 1})])
+def test_api_admission_does_not_override_explicit_operator_policy(tier, extra):
+    adapter = api_admitted_adapter()
+    adapter._tool_policy = ToolPolicy.parse(json.dumps({"tools": [{"participant_identity": "client-a",
+        "tool_name": "display_card", "tier": tier, **extra}]}))
+    assert not adapter._tool_policy_decision("client-a", "display_card").allowed
+
+
+def test_malformed_operator_policy_stays_closed_even_for_an_admitted_client(monkeypatch):
+    adapter = api_admitted_adapter()
+    monkeypatch.setattr("hermes_realtime.adapter.get_scoped_secret", lambda *args: "not JSON")
+    adapter._tool_policy = adapter._resolve_tool_policy()
+    assert not adapter._tool_policy_decision("client-a", "display_card").allowed
+
+
+def test_admission_lease_is_for_the_exact_live_participant(monkeypatch):
+    adapter = api_admitted_adapter()
+    assert adapter._api_client_admission("client-a") is not None
+    monkeypatch.setattr("hermes_realtime.client_admission.time.time", lambda: 9_999_999_999)
+    assert adapter._api_client_admission("client-a") is not None
+    prior = adapter._room.remote_participants["client-a"]
+    adapter._room.remote_participants["client-a"] = SimpleNamespace(metadata=prior.metadata)
+    assert adapter._api_client_admission("client-a") is None
+
+
+def test_conference_voice_context_preserves_instructions_and_tracks_display_availability():
+    adapter = api_admitted_adapter()
+    adapter._realtime_protocol = SimpleNamespace(instructions="Keep the user's preferences.", tool_choice="auto")
+    assert adapter._voice_prompt_for_client("client-a") == "Voice guidance.\n\nKeep the user's preferences."
+    adapter._tool_owners["scoped"] = "client-a"
+    adapter._tool_methods["scoped"] = "display_card"
+    assert "Show supporting detail." in adapter._voice_prompt_for_client("client-a")
+    adapter._realtime_protocol.tool_choice = "none"
+    assert "Show supporting detail." not in adapter._voice_prompt_for_client("client-a")
+    assert adapter._voice_prompt_for_client("client-b") == "Keep the user's preferences."
 
 
 @pytest.mark.asyncio
@@ -583,7 +672,7 @@ async def test_remote_tool_handler_cancellation_abandons_native_rpc_wait() -> No
     task = asyncio.create_task(
         adapter._build_tool_handler("client-1", "desktop_notify")({})
     )
-    await started.wait()
+    await asyncio.wait_for(started.wait(), 2)
 
     task.cancel()
 
@@ -627,7 +716,7 @@ async def test_loop_stop_cancels_only_its_cross_loop_native_rpc(
         for name in ("a", "b")
     }
     try:
-        await asyncio.gather(*(event.wait() for event in started.values()))
+        await asyncio.wait_for(asyncio.gather(*(event.wait() for event in started.values())), 2)
 
         hermes_realtime._on_agent_loop_stopped_hook(
             session_key="session-a", platform="livekit"
