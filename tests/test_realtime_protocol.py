@@ -203,6 +203,7 @@ async def test_accepts_bounded_session_update_and_targets_snapshot() -> None:
         "id": "room-a",
         "type": "realtime",
         "model": "local-model",
+        "reasoning_effort": None,
         "instructions": "Reply briefly.",
         "tool_choice": "none",
         "audio": {"output": {"voice": "local-voice"}},

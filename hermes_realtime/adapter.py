@@ -90,6 +90,7 @@ from .tool_result_protocol import (
 )
 from .direct_tools import resolve_gateway_session_key
 from .client_admission import ClientAdmission, verify_client_admission
+from .model_controls import select_model, ModelControlError
 from .tool_model import (
     FunctionToolDefinition,
     ToolDefinitionError,
@@ -689,7 +690,19 @@ class LiveKitAdapter(NativeTranscriptMixin, LiveKitStreamingTTSMixin, BasePlatfo
             on_text_input=self._handle_realtime_text_input,
             on_response_requested=self._handle_realtime_response_requested,
             on_response_cancelled=self._cancel_realtime_response,
+            on_model_selection=self._select_conference_model,
         )
+
+    async def _select_conference_model(self, model, effort, identity):
+        room, generation = self._room, self._room_generation
+        participant = room.remote_participants.get(identity) if room else None
+        if self._api_client_admission(identity) is None:
+            raise ModelControlError("model_controls_denied", "Join through the authenticated API to change this model.")
+        source = self.build_source(chat_id=self._room_name, chat_name=self._room_name,
+                                   chat_type="group", user_id=identity, user_name=identity)
+        return await select_model(self, source, model, effort, is_current=lambda: (
+            self._room is room and self._room_generation == generation
+            and room.remote_participants.get(identity) is participant))
 
     async def _publish_realtime_event(
         self,

@@ -11,6 +11,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any, Optional
 
 from .tool_model import ToolDefinitionError, parse_tool_choice
+from .model_controls import ModelControlError, validate_selection
 
 
 MAX_EVENT_BYTES = 256 * 1024
@@ -54,6 +55,7 @@ class RealtimeProtocol:
         on_response_cancelled: ClientCallback | None = None,
         on_input_audio_state: InputAudioStateCallback | None = None,
         on_tool_choice_updated: ToolChoiceCallback | None = None,
+        on_model_selection: Callable[..., Awaitable[dict]] | None = None,
         instructions: str = "",
         tool_choice: str | dict[str, str] = "auto",
         tool_names: set[str] | None = None,
@@ -68,6 +70,10 @@ class RealtimeProtocol:
         self._on_response_cancelled = on_response_cancelled
         self._on_input_audio_state = on_input_audio_state
         self._on_tool_choice_updated = on_tool_choice_updated
+        self._on_model_selection = on_model_selection
+        self.reasoning_effort = None
+        self._selection_task = None
+        self._selection_identity = None
         self.instructions = instructions
         self.tool_choice = tool_choice
         self._tool_names = set(tool_names or ())
@@ -115,6 +121,8 @@ class RealtimeProtocol:
         )
 
     def client_disconnected(self, identity: str) -> None:
+        if self._selection_identity == identity and self._selection_task is not None:
+            self._selection_task.cancel()
         self._clients.discard(identity)
         self._input_items.pop(identity, None)
         self._pending_text_inputs.pop(identity, None)
@@ -218,6 +226,7 @@ class RealtimeProtocol:
             "id": self.session_id,
             "type": "realtime",
             "model": self.model,
+            "reasoning_effort": self.reasoning_effort,
             "instructions": self.instructions,
             "tool_choice": self.tool_choice,
             "audio": {"output": {"voice": self.voice}},
@@ -239,7 +248,11 @@ class RealtimeProtocol:
                 triggering_event_id=event_id,
             )
             return
-        allowed = {"type", "instructions", "tool_choice"}
+        if self._selection_task is not None:
+            await self._error("session_update_busy", "Wait for the pending model selection.", identity,
+                              triggering_event_id=event_id)
+            return
+        allowed = {"type", "instructions", "tool_choice", "model", "reasoning_effort"}
         unknown = next((key for key in session if key not in allowed), None)
         if unknown is not None:
             await self._error(
@@ -282,11 +295,49 @@ class RealtimeProtocol:
                 triggering_event_id=event_id,
             )
             return
+        if "model" in session or "reasoning_effort" in session:
+            model = session.get("model", self.model)
+            effort = session.get("reasoning_effort", None if "model" in session else self.reasoning_effort)
+            try:
+                validate_selection(model, effort)
+                if self._on_model_selection is None:
+                    raise ModelControlError("model_controls_unavailable", "Model controls are unavailable on this transport.")
+            except ModelControlError as exc:
+                await self._error(exc.code, str(exc), identity, triggering_event_id=event_id)
+                return
+            self._selection_identity = identity
+            self._selection_task = asyncio.create_task(self._finish_model_selection(
+                model, effort, instructions, tool_choice, identity, event_id))
+            return
+        await self._commit_session_update(instructions, tool_choice, identity, event_id)
+
+    async def _finish_model_selection(self, model, effort, instructions, tool_choice, identity, event_id):
+        try:
+            selected = await self._on_model_selection(model, effort, identity)
+            if self._closed or identity not in self._clients:
+                return
+            self.model, self.reasoning_effort = selected["model"], selected["reasoning_effort"]
+            await self._commit_session_update(instructions, tool_choice, identity, event_id)
+        except ModelControlError as exc:
+            if not self._closed:
+                await self._error(exc.code, str(exc), identity, triggering_event_id=event_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            if not self._closed:
+                await self._error("model_selection_failed", "Hermes could not change the model. Try again.",
+                                  identity, triggering_event_id=event_id)
+        finally:
+            self._selection_task = None
+            self._selection_identity = None
+
+    async def _commit_session_update(self, instructions, tool_choice, identity, event_id):
         self.instructions = instructions
         self.tool_choice = tool_choice
         await _call(self._on_tool_choice_updated, tool_choice)
         await self._emit(
-            {"type": "session.updated", "session": self._session_snapshot()},
+            {"type": "session.updated", "session": self._session_snapshot(),
+             **({"client_event_id": event_id} if event_id else {})},
             recipient=identity,
         )
 
@@ -593,6 +644,10 @@ class RealtimeProtocol:
 
     async def close(self) -> None:
         self._closed = True
+        task, self._selection_task = self._selection_task, None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         self._cancel_pending_tool()
         self._clients.clear()
         self._input_items.clear()

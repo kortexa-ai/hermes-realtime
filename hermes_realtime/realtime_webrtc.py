@@ -19,6 +19,7 @@ import re
 import time
 import uuid
 from .client_admission import VoiceContext, parse_voice_context
+from .model_controls import select_model, ModelControlError
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from fractions import Fraction
@@ -767,6 +768,7 @@ class RealtimeWebRTCAdapter(NativeTranscriptMixin, RealtimeStreamingTTSMixin, Ba
                 ),
                 on_response_cancelled=lambda _identity: self.cancel_call_response(call),
                 on_input_audio_state=lambda muted, _identity: call.set_input_audio_state(muted),
+                on_model_selection=lambda model, effort, identity: self._select_call_model(call, model, effort, identity),
                 on_tool_choice_updated=lambda choice: (
                     call.tool_bridge.set_tool_choice(choice)
                     if call.tool_bridge is not None
@@ -920,6 +922,12 @@ class RealtimeWebRTCAdapter(NativeTranscriptMixin, RealtimeStreamingTTSMixin, Ba
         )
         await call.protocol.response_started()
         await self.handle_message(event)
+
+    async def _select_call_model(self, call, model, effort, identity):
+        if call.closed or identity != call.client_identity:
+            raise ModelControlError("session_closed", "The voice session was replaced.")
+        return await select_model(self, self._source_for_call(call), model, effort,
+                                  is_current=lambda: not call.closed and self._calls.get(call.call_id) is call)
 
     def _source_for_call(self, call: RealtimeCall) -> Any:
         return self.build_source(

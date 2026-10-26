@@ -698,6 +698,22 @@ when the owner's `display_card` tool is registered and enabled. Direct Realtime
 accepts this context only inside its verified, body-bound API proxy request;
 ordinary direct clients cannot assert it through an unsigned session field.
 
+Voice clients can send `session.update` with `model` and optional
+`reasoning_effort` (`low`, `medium`, `high`, `xhigh`, or `null` for the model
+default). The owning profile's `kortexa.ai` provider supplies the authenticated
+`/v1/agent/models` catalog, including the API-owned `fast` and `smart` aliases.
+An unavailable target fails explicitly. Session controls use Hermes's native
+model resolution, selection guards and next-turn commit; they do not rewrite
+profile defaults or change an agent already answering. Conference model controls
+require the signed API participant admission.
+
+Wait for `session.updated.client_event_id` to acknowledge a selection. Errors
+correlate through `error.event_id` and retain the preceding model/effort.
+Overlapping updates return `session_update_busy`; connection closure cancels
+pending selection work. Model changes that require native Hermes confirmation
+return `model_confirmation_required` instead of accepting silently. Existing
+clients that send no model selection keep their native Hermes session model.
+
 Advertised RPC method names use case-sensitive ASCII identifier segments
 separated by single dots, with a 64-character total limit. For example,
 `camera.snapshot` is valid; `.camera`, `camera.`, `camera..snapshot`, path
