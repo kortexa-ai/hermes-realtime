@@ -13,6 +13,7 @@ from .tool_model import (
     parse_function_tools,
     parse_tool_choice,
 )
+from .client_image import decode_client_image
 
 
 DIRECT_TOOLSET_NAME = "realtime-client-tools"
@@ -176,6 +177,15 @@ class DirectToolBridge:
             self.close()
             raise
 
+    def replace(self, tools: Iterable[DirectToolDefinition]) -> None:
+        previous = list(self._definitions.values())
+        self.close()
+        try:
+            self.register(tools)
+        except Exception:
+            self.register(previous)
+            raise
+
     def set_tool_choice(self, tool_choice: str | dict[str, str]) -> None:
         """Expose only the registry entries allowed for the next Hermes turn."""
         if self._session_toolset is not None:
@@ -269,7 +279,9 @@ class DirectToolBridge:
         )
 
     def _handler(self, advertised_name: str):
-        async def proxy(args: dict[str, Any] | None = None, **kwargs: Any) -> str:
+        async def proxy(args: dict[str, Any] | None = None, **kwargs: Any) -> Any:
+            if not any(definition.name == advertised_name for definition in self._definitions.values()):
+                raise RuntimeError("realtime client tool was disabled")
             invocation_session = kwargs.get("session_id")
             if not self._owns_invocation(invocation_session):
                 raise RuntimeError("realtime tool invoked outside its owning session")
@@ -305,14 +317,17 @@ class DirectToolBridge:
         """Resolve Hermes's persisted session ID to its gateway routing key."""
         return resolve_gateway_session_key(session_id)
 
-    async def _request(self, name: str, arguments: dict[str, Any]) -> str:
+    async def _request(self, name: str, arguments: dict[str, Any]) -> Any:
         processing_turn = self.protocol.processing_turn_id
         async with self._call_lock:
             # A sibling may have been waiting behind a cancelled tool. Never
             # let that queued invocation reopen or join a replacement turn.
             if processing_turn is None or self.protocol.processing_turn_id is not processing_turn:
                 raise asyncio.CancelledError()
-            return await self.protocol.request_client_tool(name, arguments)
+            result = await self.protocol.request_client_tool(name, arguments)
+            if not any(definition.name == name for definition in self._definitions.values()):
+                raise RuntimeError("realtime client tool was disabled")
+            return decode_client_image(result)
 
     @staticmethod
     def _scoped_name(session_id: str, advertised_name: str) -> str:

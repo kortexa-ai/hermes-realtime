@@ -14,6 +14,8 @@ from hermes_realtime.direct_tools import (
     parse_direct_tools,
 )
 from tools.registry import registry
+import base64
+import json
 
 
 def direct_session(*, choice: str = "auto") -> dict:
@@ -31,6 +33,27 @@ def direct_session(*, choice: str = "auto") -> dict:
         }],
         "tool_choice": choice,
     }
+
+
+@pytest.mark.asyncio
+async def test_compact_snapshot_direct_result_and_disabled_handler():
+    protocol = AsyncMock()
+    protocol.tool_choice = "auto"
+    data = base64.b64encode(bytes([255,216,255,192,0,8,8,0,4,0,6,1,255,217])).decode()
+    protocol.request_client_tool.return_value = json.dumps({"type": "client_image", "version": 1, "mime_type": "image/jpeg", "data": data, "width": 6, "height": 4, "text": "Synthetic snapshot"})
+    tools, _ = parse_direct_tools(direct_session())
+    bridge = DirectToolBridge(session_id="owned", protocol=protocol)
+    bridge.register(tools)
+    entry = registry.get_entry(next(iter(bridge._registered)))
+    try:
+        result = await entry.handler({}, session_id="owned")
+        assert result["_multimodal"] is True
+        assert result["content"][1]["image_url"]["url"] == "data:image/jpeg;base64," + data
+        bridge.replace([])
+        with pytest.raises(RuntimeError, match="disabled"):
+            await entry.handler({}, session_id="owned")
+    finally:
+        bridge.close()
 
 
 def test_parses_openai_flat_function_tools_and_supported_choices() -> None:

@@ -40,6 +40,33 @@ class FakeLocalParticipant:
         return self.result
 
 
+@pytest.mark.asyncio
+async def test_compact_snapshot_rpc_becomes_native_image_content():
+    import base64
+    data = base64.b64encode(bytes([255,216,255,192,0,8,8,0,4,0,6,1,255,217])).decode()
+    participant = FakeLocalParticipant(json.dumps({"type": "client_image", "version": 1, "mime_type": "image/jpeg", "data": data, "width": 6, "height": 4, "text": "Synthetic snapshot"}))
+    adapter = adapter_with_client(participant)
+    handler = adapter._build_tool_handler("client-1", "desktop_notify")
+    result = await handler({})
+    assert result["_multimodal"] is True
+    assert result["content"][1]["image_url"]["url"] == "data:image/jpeg;base64," + data
+
+
+@pytest.mark.asyncio
+async def test_tool_replacement_fences_an_old_handler_and_its_inflight_rpc():
+    participant = FakeLocalParticipant()
+    adapter = adapter_with_client(participant)
+    handler = adapter._build_tool_handler("client-1", "desktop_notify")
+    async def replace(**kwargs):
+        adapter._build_tool_handler("client-1", "desktop_notify")
+        return '{"ok":true}'
+    participant.perform_rpc = replace
+    with pytest.raises(RuntimeError, match="disabled or replaced"):
+        await handler({})
+    with pytest.raises(RuntimeError, match="replaced"):
+        await handler({})
+
+
 def adapter_with_client(
     local_participant: FakeLocalParticipant, identity: str = "client-1"
 ) -> LiveKitAdapter:

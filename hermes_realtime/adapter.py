@@ -89,6 +89,7 @@ from .tool_result_protocol import (
     validate_stream_header,
 )
 from .direct_tools import resolve_gateway_session_key
+from .client_image import decode_client_image
 from .client_admission import ClientAdmission, verify_client_admission
 from .model_controls import select_model, ModelControlError
 from .tool_model import (
@@ -691,7 +692,19 @@ class LiveKitAdapter(NativeTranscriptMixin, LiveKitStreamingTTSMixin, BasePlatfo
             on_response_requested=self._handle_realtime_response_requested,
             on_response_cancelled=self._cancel_realtime_response,
             on_model_selection=self._select_conference_model,
+            on_tools_updated=self._replace_realtime_client_tools,
         )
+
+    async def _replace_realtime_client_tools(self, tools, identity):
+        room, generation = self._room, self._room_generation
+        if not self._tool_message_is_current(identity, room, generation):
+            raise RuntimeError("Tool owner unavailable")
+        await self._register_client_tools({"tools": [
+            {"type": "function", "function": {"name": tool.name, "description": tool.description, "parameters": tool.parameters}}
+            for tool in tools]}, identity, receiving_room=room, receiving_generation=generation)
+        actual = {self._tool_methods.get(name) for name in self._client_tools.get(identity, set())}
+        if actual != {tool.name for tool in tools}:
+            raise RuntimeError("Tool registration denied")
 
     async def _select_conference_model(self, model, effort, identity):
         room, generation = self._room, self._room_generation
@@ -2259,6 +2272,9 @@ class LiveKitAdapter(NativeTranscriptMixin, LiveKitStreamingTTSMixin, BasePlatfo
         """
 
         self._ensure_binary_state()
+        revisions = self.__dict__.setdefault("_client_tool_revisions", {})
+        revision = object()
+        revisions[(owner_identity, registered_name)] = revision
         owner_room = self._room
         owner_generation = getattr(self, "_room_generation", 0)
         owner_participant = owner_room.remote_participants.get(owner_identity) if owner_room else None
@@ -2273,7 +2289,8 @@ class LiveKitAdapter(NativeTranscriptMixin, LiveKitStreamingTTSMixin, BasePlatfo
             import json as _json
 
             if (self._room is not owner_room or getattr(self, "_room_generation", 0) != owner_generation
-                    or owner_room is None or owner_room.remote_participants.get(owner_identity) is not owner_participant):
+                    or owner_room is None or owner_room.remote_participants.get(owner_identity) is not owner_participant
+                    or revisions.get((owner_identity, registered_name)) is not revision):
                 raise RuntimeError("remote tool owner was replaced")
 
             decision = self._tool_policy_decision(owner_identity, registered_name)
@@ -2305,7 +2322,10 @@ class LiveKitAdapter(NativeTranscriptMixin, LiveKitStreamingTTSMixin, BasePlatfo
                     raise RuntimeError("remote tool room was replaced")
                 if room.remote_participants.get(owner_identity) is not owner_participant:
                     raise RuntimeError("remote tool owner was replaced")
+                if revisions.get((owner_identity, registered_name)) is not revision:
+                    raise RuntimeError("remote tool was disabled or replaced")
                 decoded = _json.loads(result)
+                decoded = decode_client_image(decoded)
                 if isinstance(decoded, dict) and decoded.get("type") == REFERENCE_TYPE:
                     decoded = await self._receive_binary_result(
                         result,
@@ -2315,6 +2335,8 @@ class LiveKitAdapter(NativeTranscriptMixin, LiveKitStreamingTTSMixin, BasePlatfo
                     )
                     if room.remote_participants.get(owner_identity) is not owner_participant:
                         raise RuntimeError("remote tool owner was replaced")
+                if revisions.get((owner_identity, registered_name)) is not revision:
+                    raise RuntimeError("remote tool was disabled or replaced")
             except asyncio.CancelledError:
                 self._audit_tool(
                     "invocation", owner_identity, registered_name, decision.tier, "cancelled"
@@ -2521,6 +2543,7 @@ class LiveKitAdapter(NativeTranscriptMixin, LiveKitStreamingTTSMixin, BasePlatfo
     def _deregister_tool(self, name: str, identity: str) -> None:
         """Remove a single tool from the hermes registry and our maps."""
         self._ensure_client_tool_maps()
+        self.__dict__.setdefault("_client_tool_revisions", {}).pop((identity, self._tool_methods.get(name)), None)
         try:
             from tools.registry import registry
             registry.deregister(name)
@@ -2536,6 +2559,10 @@ class LiveKitAdapter(NativeTranscriptMixin, LiveKitStreamingTTSMixin, BasePlatfo
 
     def _cleanup_client_tools(self, identity: str) -> None:
         """Deregister all tools owned by ``identity``."""
+        revisions = self.__dict__.setdefault("_client_tool_revisions", {})
+        for key in list(revisions):
+            if key[0] == identity:
+                revisions.pop(key, None)
         self._ensure_client_tool_maps()
         for name in list(self._client_tools.get(identity, set())):
             method = self._tool_methods.get(name, "")

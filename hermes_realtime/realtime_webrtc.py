@@ -769,6 +769,7 @@ class RealtimeWebRTCAdapter(NativeTranscriptMixin, RealtimeStreamingTTSMixin, Ba
                 on_response_cancelled=lambda _identity: self.cancel_call_response(call),
                 on_input_audio_state=lambda muted, _identity: call.set_input_audio_state(muted),
                 on_model_selection=lambda model, effort, identity: self._select_call_model(call, model, effort, identity),
+                on_tools_updated=lambda tools, identity: self._replace_call_tools(call, tools, identity),
                 on_tool_choice_updated=lambda choice: (
                     call.tool_bridge.set_tool_choice(choice)
                     if call.tool_bridge is not None
@@ -928,6 +929,16 @@ class RealtimeWebRTCAdapter(NativeTranscriptMixin, RealtimeStreamingTTSMixin, Ba
             raise ModelControlError("session_closed", "The voice session was replaced.")
         return await select_model(self, self._source_for_call(call), model, effort,
                                   is_current=lambda: not call.closed and self._calls.get(call.call_id) is call)
+
+    def _replace_call_tools(self, call, tools, identity):
+        if call.closed or identity != call.client_identity or self._calls.get(call.call_id) is not call:
+            raise RuntimeError("Tool owner unavailable")
+        if call.tool_bridge is None:
+            call.tool_bridge = DirectToolBridge(session_id=self._session_key_for_call(call), protocol=call.protocol,
+                                                session_toolset_factory=self._session_toolset_factory)
+        call.tool_bridge.replace(tools)
+        call.tool_bridge.set_tool_choice(call.protocol.tool_choice)
+        call.client_tool_names = {tool.name for tool in tools}
 
     def _source_for_call(self, call: RealtimeCall) -> Any:
         return self.build_source(

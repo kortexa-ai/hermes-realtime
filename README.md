@@ -709,6 +709,20 @@ require the signed API participant admission.
 
 Wait for `session.updated.client_event_id` to acknowledge a selection. Errors
 correlate through `error.event_id` and retain the preceding model/effort.
+
+The same acknowledged `session.update` supports a replacement flat `tools` list
+on both transports. Send tool and model changes separately. Registration retains
+the existing call/participant admission and tool policy; disabling a tool revokes
+pending Direct output and stale Conference handlers/results. Registry generations
+refresh the next Hermes turn without rewriting profile configuration.
+
+Client snapshot tools can return a compact `client_image` JSON result with
+`version: 1`, `mime_type: "image/jpeg"`, canonical base64 `data`, actual integer
+`width` and `height`, and a short `text` summary. The limit is 10,000 JPEG bytes
+and 640 pixels per edge, which fits the small RPC/data result path. Both transports
+validate the envelope and pass a native Hermes multimodal result; bytes are never
+sent as ordinary model text. The core vision capability policy owns any text-only
+fallback. The existing byte-stream protocol remains available for larger results.
 Overlapping updates return `session_update_busy`; connection closure cancels
 pending selection work. Model changes that require native Hermes confirmation
 return `model_confirmation_required` instead of accepting silently. Existing

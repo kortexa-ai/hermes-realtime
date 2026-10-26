@@ -10,7 +10,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any, Optional
 
-from .tool_model import ToolDefinitionError, parse_tool_choice
+from .tool_model import ToolDefinitionError, parse_tool_choice, parse_function_tools
 from .model_controls import ModelControlError, validate_selection
 
 
@@ -56,6 +56,7 @@ class RealtimeProtocol:
         on_input_audio_state: InputAudioStateCallback | None = None,
         on_tool_choice_updated: ToolChoiceCallback | None = None,
         on_model_selection: Callable[..., Awaitable[dict]] | None = None,
+        on_tools_updated: Callable[..., Any] | None = None,
         instructions: str = "",
         tool_choice: str | dict[str, str] = "auto",
         tool_names: set[str] | None = None,
@@ -71,6 +72,7 @@ class RealtimeProtocol:
         self._on_input_audio_state = on_input_audio_state
         self._on_tool_choice_updated = on_tool_choice_updated
         self._on_model_selection = on_model_selection
+        self._on_tools_updated = on_tools_updated
         self.reasoning_effort = None
         self._selection_task = None
         self._selection_identity = None
@@ -252,7 +254,7 @@ class RealtimeProtocol:
             await self._error("session_update_busy", "Wait for the pending model selection.", identity,
                               triggering_event_id=event_id)
             return
-        allowed = {"type", "instructions", "tool_choice", "model", "reasoning_effort"}
+        allowed = {"type", "instructions", "tool_choice", "model", "reasoning_effort", "tools"}
         unknown = next((key for key in session if key not in allowed), None)
         if unknown is not None:
             await self._error(
@@ -282,9 +284,18 @@ class RealtimeProtocol:
                 triggering_event_id=event_id,
             )
             return
+        replacement_tools = None
+        if "tools" in session:
+            try:
+                if self._on_tools_updated is None or "model" in session or "reasoning_effort" in session:
+                    raise ToolDefinitionError("Update tools separately from the model")
+                replacement_tools = parse_function_tools(session["tools"], nested=False, allow_dotted_names=False)
+            except ToolDefinitionError:
+                await self._error("invalid_tools", "Tool updates are unavailable or invalid; change tools separately from the model.", identity, param="session.tools", triggering_event_id=event_id)
+                return
         try:
             tool_choice = parse_tool_choice(
-                session.get("tool_choice", self.tool_choice), self._tool_names
+                session.get("tool_choice", self.tool_choice), {tool.name for tool in replacement_tools} if replacement_tools is not None else self._tool_names
             )
         except ToolDefinitionError:
             await self._error(
@@ -309,7 +320,19 @@ class RealtimeProtocol:
             self._selection_task = asyncio.create_task(self._finish_model_selection(
                 model, effort, instructions, tool_choice, identity, event_id))
             return
-        await self._commit_session_update(instructions, tool_choice, identity, event_id)
+        if replacement_tools is not None:
+            try:
+                await _call(self._on_tools_updated, replacement_tools, identity)
+            except Exception:
+                await self._error("tool_update_failed", "The client tools could not be updated. Reconnect to try again.", identity, triggering_event_id=event_id)
+                return
+            self._tool_names = {tool.name for tool in replacement_tools}
+            pending = self._pending_tool
+            if pending is not None and pending["name"] not in self._tool_names:
+                self._pending_tool = None
+                if not pending["future"].done():
+                    pending["future"].set_exception(RuntimeError("Client tool was disabled"))
+        await self._commit_session_update(instructions, tool_choice, identity, event_id, replacement_tools)
 
     async def _finish_model_selection(self, model, effort, instructions, tool_choice, identity, event_id):
         try:
@@ -331,12 +354,14 @@ class RealtimeProtocol:
             self._selection_task = None
             self._selection_identity = None
 
-    async def _commit_session_update(self, instructions, tool_choice, identity, event_id):
+    async def _commit_session_update(self, instructions, tool_choice, identity, event_id, tools=None):
         self.instructions = instructions
         self.tool_choice = tool_choice
         await _call(self._on_tool_choice_updated, tool_choice)
         await self._emit(
-            {"type": "session.updated", "session": self._session_snapshot(),
+            {"type": "session.updated", "session": {**self._session_snapshot(), **({"tools": [
+                {"type": "function", "name": tool.name, "description": tool.description, "parameters": tool.parameters}
+                for tool in tools]} if tools is not None else {})},
              **({"client_event_id": event_id} if event_id else {})},
             recipient=identity,
         )

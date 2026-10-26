@@ -26,6 +26,29 @@ def protocol_fixture(**callbacks):
 
 
 @pytest.mark.asyncio
+async def test_tool_replacement_is_correlated_and_revokes_a_pending_camera():
+    changes = []
+    protocol, sent = protocol_fixture(on_tools_updated=lambda tools, identity: changes.append((tools, identity)))
+    await protocol.client_connected("client")
+    tools = [{"type": "function", "name": "camera_snapshot", "description": "Snapshot", "parameters": {"type": "object"}}]
+    await protocol.handle_client_message(json.dumps({"type": "session.update", "event_id": "enable", "session": {"type": "realtime", "tools": tools}}), "client")
+    assert changes[0][0][0].name == "camera_snapshot"
+    assert changes[0][1] == "client"
+    assert sent[-1][0]["client_event_id"] == "enable"
+    assert sent[-1][0]["session"]["tools"] == tools
+    request = asyncio.create_task(protocol.request_client_tool("camera_snapshot", {}))
+    for _ in range(10):
+        await asyncio.sleep(0)
+        if protocol._pending_tool is not None:
+            break
+    await protocol.handle_client_message(json.dumps({"type": "session.update", "event_id": "disable", "session": {"type": "realtime", "tools": []}}), "client")
+    with pytest.raises(RuntimeError, match="disabled"):
+        await request
+    assert sent[-1][0]["session"]["tools"] == []
+    await protocol.close()
+
+
+@pytest.mark.asyncio
 async def test_playout_then_transcript_completes_one_response():
     protocol, sent = protocol_fixture()
     await protocol.output_started()
