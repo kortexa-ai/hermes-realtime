@@ -760,6 +760,28 @@ Full JSON, bounded-binary, and participant-scoped multi-client design in
 Unknown `type` values are ignored silently — keeps the topic compatible
 with apps that share the same data channel for unrelated control traffic.
 
+### Native tool approval cards
+
+Voice approvals use the existing Hermes execution guard. The client's
+`agent.approval.subscribe` (`version: 1`) enables structured requests on both
+Realtime and Conference. A request is sent only to the subscribed participant
+that owns the active native turn. The pending native request stays paused until
+that exact request receives an offered choice.
+
+`agent.approval.requested` carries the outer voice `session_id` and an `approval`
+with opaque request/session/turn/tool-call bindings, redacted full command details,
+expiry and choices. Send `agent.approval.response` with the same outer session,
+an `event_id`, and `decision` containing all four bindings plus `choice`.
+`agent.approval.resolved` closes the card. Native once/session/always/deny choices
+are exposed only when the execution guard offers them; Hermes retains persistence.
+Clients cannot override profile policy with `approval_mode`.
+
+Disconnect, replacement, expiry and turn cancellation withdraw the exact pending
+native request. A stale, foreign or replayed answer cannot grant permission.
+If another native surface settles the request, the voice card closes without
+inventing an approval outcome. Commands over 8 KiB are declined rather than
+truncated for review. Automatic native execution mode remains unchanged.
+
 ### Video / camera-frame semantics
 
 The LiveKit SDK receives and decodes a subscribed camera continuously. The

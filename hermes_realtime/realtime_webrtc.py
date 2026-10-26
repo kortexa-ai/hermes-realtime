@@ -71,6 +71,7 @@ from .adapter import (
 )
 from .realtime_protocol import MAX_INSTRUCTIONS_BYTES, RealtimeProtocol
 from .direct_tools import DirectToolBridge, DirectToolError, parse_direct_tools
+from .approval_bridge import ApprovalOrigin, approval_bridge, remember_approval_origin, forget_approval_origin
 from .vad import AdaptiveRmsGate, configured_silence_duration, configured_vad_factory
 from .media import (EarlyTranscription, configured_asr_prefetch, pcm_rms,
                     transcribe_pcm, transcribe_with_prefetch, append_capture, PREROLL_BYTES)
@@ -740,6 +741,8 @@ class RealtimeWebRTCAdapter(NativeTranscriptMixin, RealtimeStreamingTTSMixin, Ba
             if session.get("type", "realtime") != "realtime":
                 raise web.HTTPBadRequest(text="only realtime sessions are supported")
             tools, tool_choice = parse_direct_tools(session)
+            if "approval_mode" in session:
+                raise DirectToolError("Hermes approval policy belongs to the backend profile")
             instructions = session.get("instructions", "")
             if (
                 not isinstance(instructions, str)
@@ -770,6 +773,9 @@ class RealtimeWebRTCAdapter(NativeTranscriptMixin, RealtimeStreamingTTSMixin, Ba
                 on_input_audio_state=lambda muted, _identity: call.set_input_audio_state(muted),
                 on_model_selection=lambda model, effort, identity: self._select_call_model(call, model, effort, identity),
                 on_tools_updated=lambda tools, identity: self._replace_call_tools(call, tools, identity),
+                on_approval_subscribe=lambda identity: approval_bridge(self).subscribe(identity, call_id),
+                on_approval_response=lambda event, identity: approval_bridge(self).respond(event, identity),
+                on_approval_disconnect=lambda identity: approval_bridge(self).unsubscribe(identity, call_id),
                 on_tool_choice_updated=lambda choice: (
                     call.tool_bridge.set_tool_choice(choice)
                     if call.tool_bridge is not None
@@ -1049,9 +1055,18 @@ class RealtimeWebRTCAdapter(NativeTranscriptMixin, RealtimeStreamingTTSMixin, Ba
             return
         await call.protocol.processing_started()
         event._hermes_realtime_response = (call.protocol, call.protocol.processing_turn_id)
+        turn = call.protocol.processing_turn_id
+        if callable(getattr(getattr(self, "gateway_runner", None), "_session_key_for_source", None)):
+            remember_approval_origin(self, event, ApprovalOrigin(call.client_identity, call.call_id, event.message_id or uuid.uuid4().hex,
+                lambda: not call.closed and self._calls.get(call.call_id) is call and call.protocol.processing_turn_id is turn,
+                lambda value: call.publish(value, call.client_identity)))
+
+    async def _send_exec_approval_prompt(self, prompt):
+        return await approval_bridge(self).request(prompt)
 
     async def on_processing_complete(self, event: MessageEvent, outcome: ProcessingOutcome) -> None:
         """Finish turns that deliver only audio, fail, or are cancelled by Hermes."""
+        forget_approval_origin(self, event)
         call = self._calls.get(event.source.chat_id)
         if call is None:
             return

@@ -90,6 +90,7 @@ from .tool_result_protocol import (
 )
 from .direct_tools import resolve_gateway_session_key
 from .client_image import decode_client_image
+from .approval_bridge import ApprovalOrigin, approval_bridge, remember_approval_origin, forget_approval_origin
 from .client_admission import ClientAdmission, verify_client_admission
 from .model_controls import select_model, ModelControlError
 from .tool_model import (
@@ -693,7 +694,15 @@ class LiveKitAdapter(NativeTranscriptMixin, LiveKitStreamingTTSMixin, BasePlatfo
             on_response_cancelled=self._cancel_realtime_response,
             on_model_selection=self._select_conference_model,
             on_tools_updated=self._replace_realtime_client_tools,
+            on_approval_subscribe=self._subscribe_voice_approvals,
+            on_approval_response=lambda event, identity: approval_bridge(self).respond(event, identity),
+            on_approval_disconnect=lambda identity: approval_bridge(self).unsubscribe(identity, self._room_name),
         )
+
+    def _subscribe_voice_approvals(self, identity):
+        if self._api_client_admission(identity) is None:
+            raise ValueError("Authenticated participant admission required")
+        approval_bridge(self).subscribe(identity, self._room_name)
 
     async def _replace_realtime_client_tools(self, tools, identity):
         room, generation = self._room, self._room_generation
@@ -2872,9 +2881,22 @@ class LiveKitAdapter(NativeTranscriptMixin, LiveKitStreamingTTSMixin, BasePlatfo
             return
         await protocol.processing_started()
         event._hermes_realtime_response = (protocol, protocol.processing_turn_id)
+        if callable(getattr(getattr(self, "gateway_runner", None), "_session_key_for_source", None)):
+            room, generation, turn = self._room, self._room_generation, protocol.processing_turn_id
+            identity = event.source.user_id
+            participant = room.remote_participants.get(identity) if room else None
+            remember_approval_origin(self, event, ApprovalOrigin(identity, self._room_name, event.message_id or uuid.uuid4().hex,
+                lambda: self._room is room and self._room_generation == generation and room is not None
+                    and room.remote_participants.get(identity) is participant and protocol.processing_turn_id is turn
+                    and self._api_client_admission(identity) is not None,
+                lambda value: self._publish_typed(value, identity=identity, topic=self.DATA_CHANNEL_EVENTS_TOPIC)))
+
+    async def _send_exec_approval_prompt(self, prompt):
+        return await approval_bridge(self).request(prompt)
 
     async def on_processing_complete(self, event: MessageEvent, outcome: ProcessingOutcome) -> None:
         """Finish turns that deliver only audio, fail, or are cancelled by Hermes."""
+        forget_approval_origin(self, event)
         protocol = self._realtime_protocol
         if protocol is None or event.source.chat_id != self._room_name:
             return

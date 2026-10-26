@@ -26,6 +26,31 @@ def protocol_fixture(**callbacks):
 
 
 @pytest.mark.asyncio
+async def test_approval_controls_require_subscription_session_and_disconnect_with_the_owner():
+    subscribed, decisions, disconnected = [], [], []
+    protocol, sent = protocol_fixture(on_approval_subscribe=lambda identity: subscribed.append(identity),
+                                     on_approval_response=lambda event, identity: decisions.append((event, identity)),
+                                     on_approval_disconnect=lambda identity: disconnected.append(identity))
+    await protocol.client_connected("owner")
+    assert sent[-1][0]["session"]["capabilities"]["approvals"] is True
+    response = {"type": "agent.approval.response", "session_id": "room-a", "decision": {"request_id": "fixture"}}
+    await protocol.handle_client_message(json.dumps(response), "owner")
+    assert decisions == []
+    await protocol.handle_client_message('{"type":"agent.approval.subscribe","version":1}', "owner")
+    assert subscribed == ["owner"]
+    assert sent[-1][0]["type"] == "agent.approval.subscribed"
+    await protocol.handle_client_message(json.dumps({**response, "session_id": "other"}), "owner")
+    assert decisions == []
+    await protocol.handle_client_message(json.dumps(response), "owner")
+    assert decisions == [(response, "owner")]
+    protocol.client_disconnected("owner")
+    assert disconnected == ["owner"]
+    await protocol.handle_client_message(json.dumps(response), "owner")
+    assert len(decisions) == 1
+    await protocol.close()
+
+
+@pytest.mark.asyncio
 async def test_tool_replacement_is_correlated_and_revokes_a_pending_camera():
     changes = []
     protocol, sent = protocol_fixture(on_tools_updated=lambda tools, identity: changes.append((tools, identity)))

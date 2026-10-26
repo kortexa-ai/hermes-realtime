@@ -57,6 +57,9 @@ class RealtimeProtocol:
         on_tool_choice_updated: ToolChoiceCallback | None = None,
         on_model_selection: Callable[..., Awaitable[dict]] | None = None,
         on_tools_updated: Callable[..., Any] | None = None,
+        on_approval_subscribe: Callable[..., Any] | None = None,
+        on_approval_response: Callable[..., Any] | None = None,
+        on_approval_disconnect: Callable[..., Any] | None = None,
         instructions: str = "",
         tool_choice: str | dict[str, str] = "auto",
         tool_names: set[str] | None = None,
@@ -73,6 +76,10 @@ class RealtimeProtocol:
         self._on_tool_choice_updated = on_tool_choice_updated
         self._on_model_selection = on_model_selection
         self._on_tools_updated = on_tools_updated
+        self._on_approval_subscribe = on_approval_subscribe
+        self._on_approval_response = on_approval_response
+        self._on_approval_disconnect = on_approval_disconnect
+        self._approval_clients = set()
         self.reasoning_effort = None
         self._selection_task = None
         self._selection_identity = None
@@ -123,6 +130,9 @@ class RealtimeProtocol:
         )
 
     def client_disconnected(self, identity: str) -> None:
+        self._approval_clients.discard(identity)
+        if self._on_approval_disconnect is not None:
+            self._on_approval_disconnect(identity)
         if self._selection_identity == identity and self._selection_task is not None:
             self._selection_task.cancel()
         self._clients.discard(identity)
@@ -170,7 +180,23 @@ class RealtimeProtocol:
         if not isinstance(event_id, str) or len(event_id.encode("utf-8")) > MAX_EVENT_ID_BYTES:
             event_id = None
         event_type = event.get("type")
-        if event_type == "session.update":
+        if event_type == "agent.approval.subscribe":
+            try:
+                if event.get("version") != 1 or self._on_approval_subscribe is None:
+                    raise ValueError("Unsupported approval version")
+                await _call(self._on_approval_subscribe, identity)
+                self._approval_clients.add(identity)
+                await self._emit({"type": "agent.approval.subscribed", "version": 1, "session_id": self.session_id}, recipient=identity)
+            except Exception:
+                await self._error("approvals_unavailable", "Approval controls are unavailable", identity, triggering_event_id=event_id)
+        elif event_type == "agent.approval.response":
+            try:
+                if identity not in self._approval_clients or self._on_approval_response is None or event.get("session_id") != self.session_id:
+                    raise ValueError("Approval owner unavailable")
+                await _call(self._on_approval_response, event, identity)
+            except Exception:
+                await self._error("approval_not_pending", "The approval is unavailable or the choice was not offered", identity, triggering_event_id=event_id)
+        elif event_type == "session.update":
             await self._accept_session_update(event, identity, event_id)
         elif event_type == "conversation.item.create":
             await self._accept_conversation_item(event, identity, event_id)
@@ -232,6 +258,7 @@ class RealtimeProtocol:
             "instructions": self.instructions,
             "tool_choice": self.tool_choice,
             "audio": {"output": {"voice": self.voice}},
+            **({"capabilities": {"approvals": True}} if self._on_approval_response is not None else {}),
         }
 
     async def _accept_session_update(
@@ -668,6 +695,10 @@ class RealtimeProtocol:
             raise RuntimeError("Client tool result timeout") from None
 
     async def close(self) -> None:
+        for identity in list(self._approval_clients):
+            if self._on_approval_disconnect is not None:
+                self._on_approval_disconnect(identity)
+        self._approval_clients.clear()
         self._closed = True
         task, self._selection_task = self._selection_task, None
         if task is not None:
