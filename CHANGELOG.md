@@ -4,6 +4,20 @@ All notable changes to **hermes-realtime** are documented here, in the format
 of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] — 2026-10-29
+
+### Fixed
+
+- Allow Hermes to select compatible NumPy, Pillow and aiohttp versions in its
+  shared Python environment. Exact plugin pins could conflict with an updated
+  host and cause the updater to disable both voice transports. Distribution
+  and native plugin requirements now use matching bounded ranges; transport
+  SDK pins stay fixed.
+- Check shared requirements against the actual Hermes host dependency pins
+  in both vanilla and Kortexa test lanes.
+- Pass the selected interpreter to the current Hermes PM workspace builder
+  when preparing the isolated test environment.
+
 ## [0.5.0] — 2026-10-22
 
 ### Added

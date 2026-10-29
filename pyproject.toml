@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-realtime"
-version = "0.5.0"
+version = "0.5.1"
 description = "Direct WebRTC and LiveKit Conference voice gateways for hermes-agent"
 readme = "README.md"
 requires-python = ">=3.11,<3.15"
@@ -14,28 +14,26 @@ dependencies = [
   # Hermes is the host, not a pip dependency: current source checkouts publish
   # placeholder package version 0.0.0 and PM owns their environment. The native
   # manifest checks the real Hermes runtime version before loading this plugin.
-  # Exact pins (mirrors hermes-agent's 2026-05-12 supply-chain hardening
-  # policy): PyPI cannot ship a new livekit/livekit-api/Pillow into a
-  # user's install without an intentional bump here. Update the pins
+  # Exact transport SDK pins keep their updates deliberate. Update the pins
   # AND verify release notes / security advisories before changing.
   #   livekit==1.1.14     released 2026-07-31, no yanks; includes
   #                        remote-disconnect queue cleanup and race fixes.
   #   livekit-api==1.2.0   released 2026-07-11, no yanks.
-  #   Pillow==12.3.0       released 2026-07-01, no yanks. Used to JPEG-
-  #                        encode sampled video frames before handing them
-  #                        to Hermes' vision pipeline via media_urls.
+  # Shared libraries use bounded ranges so Hermes can select its own pins
+  # without evicting this plugin during a host update. Pillow JPEG-encodes
+  # sampled video frames for Hermes' vision pipeline via media_urls.
   "livekit==1.1.14",
   "livekit-api==1.2.0",
-  "Pillow==12.3.0",
+  "Pillow>=12.3.0,<14",
   # Direct OpenAI-compatible WebRTC signalling and media. aiortc 1.15.0
   # requires av>=14,<18; pinning the selected wheel keeps installs deliberate.
-  "aiohttp==3.14.5",
+  "aiohttp>=3.14.5,<4",
   "aiortc==1.15.0",
   "av==17.0.0",
   # Silero VAD runs by default. The pinned model ships inside the package
   # (hermes_realtime/models), so a plain install needs no download step.
   "onnxruntime==1.29.0",
-  "numpy==2.4.3",
+  "numpy>=2.4.3,<3",
 ]
 
 [project.optional-dependencies]

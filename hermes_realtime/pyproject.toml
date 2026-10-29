@@ -1,18 +1,18 @@
 # Native directory-plugin dependencies. This is deliberately metadata-only:
 # Hermes loads __init__.py from each profile and gives each PM member a unique
 # name, so two profiles can enable Realtime in their shared Python environment.
-# Keep runtime pins aligned with the pip distribution in ../pyproject.toml.
+# Keep runtime requirements aligned with the pip distribution in ../pyproject.toml.
 [project]
 name = "hermes-realtime-native"
-version = "0.5.0"
+version = "0.5.1"
 requires-python = ">=3.11,<3.15"
 dependencies = [
   "livekit==1.1.14",
   "livekit-api==1.2.0",
-  "Pillow==12.3.0",
-  "aiohttp==3.14.5",
+  "Pillow>=12.3.0,<14",
+  "aiohttp>=3.14.5,<4",
   "aiortc==1.15.0",
   "av==17.0.0",
   "onnxruntime==1.29.0",
-  "numpy==2.4.3",
+  "numpy>=2.4.3,<3",
 ]

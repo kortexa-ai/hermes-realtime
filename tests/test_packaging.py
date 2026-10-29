@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tomllib
 from ruamel.yaml import YAML
+from packaging.requirements import Requirement
 
 from pm.plugin_declarations import read_python_declaration
 from pm.workspace import _workspace_member
@@ -14,6 +15,31 @@ from pm.workspace import _workspace_member
 
 ROOT = Path(__file__).resolve().parents[1]
 NATIVE = ROOT / "hermes_realtime"
+
+
+def test_shared_dependencies_accept_the_hosts_selected_versions():
+    import gateway
+
+    host = Path(gateway.__file__).resolve().parents[1]
+    project = tomllib.loads((host / "pyproject.toml").read_text())["project"]
+    declared = list(project["dependencies"])
+    for extra in ("audio-io", "messaging"):
+        declared.extend(project["optional-dependencies"].get(extra, []))
+    plugin = {
+        requirement.name.lower(): requirement
+        for requirement in map(Requirement, read_python_declaration(NATIVE).install_requirements)
+    }
+    for requirement in map(Requirement, declared):
+        if requirement.marker and not requirement.marker.evaluate():
+            continue
+        shared = plugin.get(requirement.name.lower())
+        if shared is None:
+            continue
+        for specifier in requirement.specifier:
+            if specifier.operator == "==" and "*" not in specifier.version:
+                assert shared.specifier.contains(specifier.version), (
+                    f"{shared} rejects the Hermes host's {requirement}"
+                )
 
 
 def test_native_dependencies_admit_the_current_python_and_match_pip():

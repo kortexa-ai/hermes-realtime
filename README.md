@@ -63,6 +63,14 @@ or `hermes --profile mira gateway restart`. Use `hermes plugins list` to check
 discovery. Existing pip-only installs must migrate to this native install:
 packages added manually to a previous environment are not an enabled PM member.
 
+If an update disabled `realtime` because its dependency environment no longer
+builds, install version 0.5.1 or newer with `--enable --yes-deps` for each affected
+profile, then restart the shared gateway. These releases let Hermes select
+compatible NumPy, Pillow and aiohttp versions within bounded ranges instead of
+requiring the older plugin's exact shared-library versions. Hermes records an
+automatic disable and its reason under `plugins.disabled_by_update`; enabling
+the compatible replacement clears that record.
+
 ### Upgrade from hermes-livekit
 
 Version 0.5.0 renames the distribution to `hermes-realtime`, the Python package

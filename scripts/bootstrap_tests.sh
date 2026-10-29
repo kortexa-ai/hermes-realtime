@@ -57,7 +57,9 @@ if destination.exists() or workspace.exists():
     raise SystemExit("Test environment or build inputs already exist; remove the disposable outputs before rebuilding")
 # Match production's core + native-plugin dependency union. Hermes now supports
 # editable source installs only; building a Hermes wheel is intentionally refused.
-_generate_pyproject([repo / "hermes_realtime"], workspace, source=hermes)
+_generate_pyproject(
+    [repo / "hermes_realtime"], workspace, source=hermes, python=Path(sys.executable),
+)
 # This disposable environment runs only on this host. Preserve Hermes' Python
 # constraints without resolving unsupported targets such as Android, where the
 # plugin's native dependencies have no wheels.
