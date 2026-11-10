@@ -64,9 +64,9 @@ discovery. Existing pip-only installs must migrate to this native install:
 packages added manually to a previous environment are not an enabled PM member.
 
 If an update disabled `realtime` because its dependency environment no longer
-builds, install version 0.5.1 or newer with `--enable --yes-deps` for each affected
+builds, install version 0.5.2 or newer with `--enable --yes-deps` for each affected
 profile, then restart the shared gateway. These releases let Hermes select
-compatible NumPy, Pillow and aiohttp versions within bounded ranges instead of
+compatible NumPy, Pillow, aiohttp and PyAV versions within bounded ranges instead of
 requiring the older plugin's exact shared-library versions. Hermes records an
 automatic disable and its reason under `plugins.disabled_by_update`; enabling
 the compatible replacement clears that record.
@@ -403,7 +403,7 @@ For an end-to-end measurement from the Pi, run the isolated voice probe:
 
 ```bash
 uv run --no-project --no-build \
-  --with aiortc==1.15.0 --with aiohttp==3.14.3 --with av==17.0.0 \
+  --with aiortc==1.16.0 --with aiohttp==3.14.5 --with av==18.1.0 \
   python tools/voice_latency_probe.py \
   --gateway http://192.168.2.6:8092 --config-host snappy --profile mira --case greeting
 ```

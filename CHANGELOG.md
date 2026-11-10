@@ -4,6 +4,14 @@ All notable changes to **hermes-realtime** are documented here, in the format
 of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] — 2026-11-09
+
+### Fixed
+
+- Upgrade aiortc to 1.16.0 and allow compatible PyAV versions from 17 through
+  19 so Hermes' PyAV 18 dependency does not disable both voice transports.
+- Include Hermes' `stt-whisper` requirements in the shared dependency check.
+
 ## [0.5.1] — 2026-10-29
 
 ### Fixed

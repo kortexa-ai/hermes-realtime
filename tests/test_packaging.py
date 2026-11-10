@@ -23,7 +23,7 @@ def test_shared_dependencies_accept_the_hosts_selected_versions():
     host = Path(gateway.__file__).resolve().parents[1]
     project = tomllib.loads((host / "pyproject.toml").read_text())["project"]
     declared = list(project["dependencies"])
-    for extra in ("audio-io", "messaging"):
+    for extra in ("audio-io", "messaging", "stt-whisper"):
         declared.extend(project["optional-dependencies"].get(extra, []))
     plugin = {
         requirement.name.lower(): requirement
