@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-realtime"
-version = "0.5.2"
+version = "0.5.3"
 description = "Direct WebRTC and LiveKit Conference voice gateways for hermes-agent"
 readme = "README.md"
 requires-python = ">=3.11,<3.15"
@@ -32,7 +32,7 @@ dependencies = [
   "av>=17.0.0,<20",
   # Silero VAD runs by default. The pinned model ships inside the package
   # (hermes_realtime/models), so a plain install needs no download step.
-  "onnxruntime==1.29.0",
+  "onnxruntime>=1.29.0,<2",
   "numpy>=2.4.3,<3",
 ]
 

@@ -25,6 +25,13 @@ def test_shared_dependencies_accept_the_hosts_selected_versions():
     declared = list(project["dependencies"])
     for extra in ("audio-io", "messaging", "stt-whisper"):
         declared.extend(project["optional-dependencies"].get(extra, []))
+    # ONNX Runtime is transitive in Hermes. PM retains its host lock selection
+    # when Realtime adds the same package for Silero VAD.
+    lock = tomllib.loads((host / "uv.lock").read_text())
+    declared.extend(
+        f"onnxruntime=={package['version']}"
+        for package in lock["package"] if package["name"] == "onnxruntime"
+    )
     plugin = {
         requirement.name.lower(): requirement
         for requirement in map(Requirement, read_python_declaration(NATIVE).install_requirements)

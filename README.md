@@ -64,10 +64,9 @@ discovery. Existing pip-only installs must migrate to this native install:
 packages added manually to a previous environment are not an enabled PM member.
 
 If an update disabled `realtime` because its dependency environment no longer
-builds, install version 0.5.2 or newer with `--enable --yes-deps` for each affected
+builds, install version 0.5.3 or newer with `--enable --yes-deps` for each affected
 profile, then restart the shared gateway. These releases let Hermes select
-compatible NumPy, Pillow, aiohttp and PyAV versions within bounded ranges instead of
-requiring the older plugin's exact shared-library versions. Hermes records an
+compatible NumPy, ONNX Runtime, Pillow, aiohttp, and PyAV versions within bounded ranges. Hermes records an
 automatic disable and its reason under `plugins.disabled_by_update`; enabling
 the compatible replacement clears that record.
 

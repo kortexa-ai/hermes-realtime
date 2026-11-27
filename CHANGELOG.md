@@ -4,6 +4,14 @@ All notable changes to **hermes-realtime** are documented here, in the format
 of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.3] — 2026-11-27
+
+### Fixed
+
+- Allow Hermes to select compatible ONNX Runtime 1.x versions from 1.29.0 onward.
+  This lets both voice adapters use the host's ONNX Runtime 1.31.0 for Silero VAD.
+- Check the ONNX Runtime version selected in the host dependency lock.
+
 ## [0.5.2] — 2026-11-09
 
 ### Fixed
